@@ -114,7 +114,7 @@ def readDICOMSeries(wdir):
                 except:
                     exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
                 if dcm is not None:
-                    tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber)
+                    tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID)
                     tval=(dcm.InstanceNumber, ii)
                     if not dictDICOM.has_key(tkey):
                         dictDICOM[tkey]=[]
@@ -159,7 +159,7 @@ def findBestDICOMSeries(dictDICOM):
             arrID.append(arrSiD[ii])
             arrFN.append(tval[1])
         ret=(arrID, arrFN)
-    return ret
+    return (ret,bestKey)
 
 """
 Normalize image by Lung-preset
@@ -219,12 +219,18 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
         tsiz=imgX.shape
         tdw=42
         tr=int(tsiz[0] - round(tsiz[0]*lstZp[ii]))
-        for zz in range(-1,2,1):
+        zzRange=range(-1,2,1)
+        if imgX.shape[0]>400:
+            zzRange=range(-2,3,1)
+        for zz in zzRange:
             trr,tcc=sk.draw.line(tr+zz,tdw,tr+zz,tsiz[1]-tdw)
             sk.draw.set_color(lstImgRGB[3],(trr,tcc), lstColors[ii])
     for ii in range(len(lstImgRGB)-1):
         tsiz=lstImgRGB[ii].shape
-        trr,tcc=sk.draw.circle(64,tsiz[1]-64,9)
+        trad=9
+        if tsiz[0]>400:
+            trad=12
+        trr,tcc=sk.draw.circle(64,tsiz[1]-64,trad)
         sk.draw.set_color(lstImgRGB[ii],(trr,tcc), lstColors[ii])
     imgPH0=np.concatenate((lstImgRGB[0],lstImgRGB[1]), axis=1)
     imgPH1=np.concatenate((lstImgRGB[2],lstImgRGB[3]), axis=1)
@@ -362,7 +368,7 @@ if __name__=='__main__':
     retCMD=parseCMD(sys.argv)
     wdir=retCMD.wdir
     lstDICOM=readDICOMSeries(wdir)
-    lstData=findBestDICOMSeries(lstDICOM)
+    lstData,bestKey=findBestDICOMSeries(lstDICOM)
     imgPreviewRet=generatePreviewOutput(lstData)
     #
     imgPreviewResiz=imgPreviewRet[0]
