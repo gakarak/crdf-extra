@@ -25,6 +25,7 @@ import inspect
 #########################################
 DEF_MIN_NUMBER_OF_SLICES    = 10
 DEF_NII_PREVIEW_SIZE        = (128,128,60)
+DEF_DCM2NII_EXE             = "dcm2nii"
 
 RET_SUCCESS                 = 0
 RET_FILE_NOTFOUND           = 1
@@ -239,8 +240,8 @@ convert DICOM to Nifti with dcm2nii utility
 def convertDICOM2Nifti(fdcm,fniiOut):
     if os.path.isfile(fdcm):
         ddir=os.path.dirname(fdcm)
-        # cmdLine='dcm2nii -a y -e n -r n %s' % fdcm
-        cmdLine='dcm2nii -e n -r n %s >/dev/null' % fdcm
+        cmdLine='%s -a y -e n -r n %s' % (DEF_DCM2NII_EXE, fdcm)
+        # cmdLine='%s -e n -r n %s >/dev/null' % (DEF_DCM2NII_EXE, fdcm)
         retCode=os.system(cmdLine)
         lstNii=glob.glob('%s/*.nii*' % ddir)
         if len(lstNii)>0:
@@ -340,11 +341,13 @@ def parseCMD(argv):
         parser.print_help()
         exitError(RET_BAD_CMD_ARGS, metaInfo=argv)
     if args.out is not None:
-        odir=os.path.dirname(args.out)
-        if os.path.isdir(odir):
-            retOfile=args.out
-        else:
-            exitError(RET_DIR_NOTFOUND, metaInfo=odir)
+        retOfile=args.out
+    # if args.out is not None:
+    #     odir=os.path.dirname(args.out)
+    #     if os.path.isdir(odir):
+    #         retOfile=args.out
+    #     else:
+    #         exitError(RET_DIR_NOTFOUND, metaInfo=odir)
     ret=args
     ret.wdir=retWdir
     ret.siz=retSiz
@@ -369,10 +372,15 @@ if __name__=='__main__':
         exitError(RET_ERR_RESIZ_IMAGE, metaInfo="size=%s" % newSize)
     #
     wdirRoot=os.path.dirname(wdir)
-    studyId=os.path.basename(wdir)
+    studyId=imgPreviewRet[1] #os.path.basename(wdir)
     foutPrefix=os.path.join(wdirRoot, studyId)
     if retCMD.out is not None:
-        foutPrefix=retCMD.out
+        tNewDir=retCMD.out
+        if not os.path.isdir(tNewDir):
+            os.makedirs(tNewDir)
+        if not os.path.isdir(tNewDir):
+            exitError(RET_DIR_NOTFOUND, metaInfo=tNewDir)
+        foutPrefix=os.path.join(tNewDir, studyId)
     foutImg='%s_%d_%d.jpg' % (foutPrefix, newSize[1],newSize[0])
     foutNiiOrig='%s_orig.nii.gz' % foutPrefix
     foutNiiResiz='%s.nii.gz' % foutPrefix
