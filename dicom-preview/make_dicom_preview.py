@@ -183,6 +183,7 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
     data=None
     cnt=0
     dcmStudyId='unknown-study-id'
+    sizPad=8
     for ii in reversed(xrange(numFn)):
         tfn=lstFn[ii]
         try:
@@ -205,10 +206,10 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
     lstImg=[]
     for pp in lstZp:
         tidx=round(pp*numFn)
-        lstImg.append(calcNormImage(data[:,:,tidx]))
+        lstImg.append(np.pad(calcNormImage(data[:,:,tidx]), sizPad, 'constant', constant_values=(0)))
     imgX=np.rot90(data[data.shape[0]/2,:,:])
     imgX=sk.transform.resize(imgX.copy(), data.shape[:2], order=4)
-    lstImg.append(calcNormImage(imgX))
+    lstImg.append(np.pad(calcNormImage(imgX), sizPad, 'constant', constant_values=(0)))
     #
     lstImgRGB=[]
     for ii in lstImg:
