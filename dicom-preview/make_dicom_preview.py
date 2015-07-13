@@ -76,9 +76,9 @@ def exitError(errCode, isPrintError=True, metaInfo=None):
         if isGoodKey:
             strErrCode=errorCodes[errCode]
         if metaInfo is None:
-            print >> sys.stderr, '**ERROR (%s) [%d] : %s' % (errCode, inspect.currentframe().f_back.f_lineno, strErrCode)
+            print >> sys.stderr, '**ERROR (%s) [line=%d] : %s' % (errCode, inspect.currentframe().f_back.f_lineno, strErrCode)
         else:
-            print >> sys.stderr, '**ERROR (%s) [%d] : %s, info = [%s]' % (errCode, inspect.currentframe().f_back.f_lineno, strErrCode, metaInfo)
+            print >> sys.stderr, '**ERROR (%s) [line=%d] : %s, info = [%s]' % (errCode, inspect.currentframe().f_back.f_lineno, strErrCode, metaInfo)
     sys.exit(errCode)
 
 """
@@ -141,8 +141,8 @@ def findBestDICOMSeries(dictDICOM):
         if tnum>maxSlices:
             maxSlices=tnum
             bestKey=kk
-    if maxSlices<DEF_MIN_NUMBER_OF_SLICES:
-        exitError(RET_SMALL_NUM_SLICES)
+    # if maxSlices<DEF_MIN_NUMBER_OF_SLICES:
+    #     exitError(RET_SMALL_NUM_SLICES)
     if bestKey is not None:
         arrSiD=[]
         lstDCM=dictDICOM[bestKey]
@@ -201,7 +201,7 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
             cnt+=1
         except:
             exitError(RET_READ_ERROR_DICOM, metaInfo=tfn)
-    lstZp=np.linspace(0.3,0.8,3)
+    lstZp=np.linspace(0.8,0.3,3)
     lstImg=[]
     for pp in lstZp:
         tidx=round(pp*numFn)
@@ -213,7 +213,7 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
     lstImgRGB=[]
     for ii in lstImg:
         lstImgRGB.append(sk.color.gray2rgb(ii))
-    lstColors=((255,0,0),(255,255,0),(0,255,0))
+    lstColors=((0,255,0),(255,255,0),(255,0,0))
     for ii in xrange(len(lstZp)):
         tsiz=imgX.shape
         tdw=42
@@ -314,6 +314,7 @@ def parseCMD(argv):
     parser=argparse.ArgumentParser(
         description='Prepare preview image for DICOM directory. Example: %s -siz 512x512 -nii -zip -rm /path/to/directory-with-DICOM' % pProg)
     parser.add_argument('-siz', help='size output preview image, like 512x512')
+    parser.add_argument('-preview', action="store_true",  help='flag, if present - generate preview image')
     parser.add_argument('-out', help='output prefix (without extension)')
     parser.add_argument('-rm',  action="store_true", help='flag, if present - remove input directory with DICOMs')
     parser.add_argument('-nii', action="store_true", help='flag, if present - create Nifti image')
@@ -358,7 +359,6 @@ def parseCMD(argv):
 #########################################
 if __name__=='__main__':
     retCMD=parseCMD(sys.argv)
-    # print retCMD
     wdir=retCMD.wdir
     lstDICOM=readDICOMSeries(wdir)
     lstData=findBestDICOMSeries(lstDICOM)
