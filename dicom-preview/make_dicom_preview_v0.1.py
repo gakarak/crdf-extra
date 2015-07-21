@@ -7,7 +7,6 @@ import dicom
 import nibabel as nib
 import zipfile
 
-import time
 import glob
 import argparse
 import os
@@ -27,8 +26,6 @@ import inspect
 DEF_MIN_NUMBER_OF_SLICES    = 10
 DEF_NII_PREVIEW_SIZE        = (128,128,60)
 DEF_DCM2NII_EXE             = "dcm2nii"
-DEF_DCMANON_EXE             = "gdcmanon"
-DEF_DCMDIRTMP_PREF          = "-tmp_%" % time.time()
 
 RET_SUCCESS                 = 0
 RET_FILE_NOTFOUND           = 1
@@ -47,7 +44,6 @@ RET_CONV_NII_NOTFOUND       = 13
 RET_NII_RESIZ_AND_SAVE      = 14
 RET_ERR_CREATE_ZIP          = 15
 RET_ERR_REMOVE_DIR          = 16
-RET_ERR_MOVE_DIR            = 17
 errorCodes = {
     RET_SUCCESS:            'Success',
     RET_FILE_NOTFOUND:      'File not found',
@@ -315,15 +311,6 @@ def saveListFilesToZip(lstFiles, foutZip, pref=None):
         except:
             exitError(RET_ERR_CREATE_ZIP, metaInfo=foutZip)
 
-def makeAnonymization(dirDICOM):
-    if not os.path.isdir(dirDICOM):
-        exitError(RET_DIR_NOTFOUND, metaInfo=dirDICOM)
-    dirDICOMtmp="%s%s" % (dirDICOM,DEF_DCMDIRTMP_PREF)
-    try:
-        pass
-    except:
-        pass
-        # exitError(RET)
 
 """
 Parse Command Line Arguments
@@ -339,7 +326,6 @@ def parseCMD(argv):
     parser.add_argument('-rm',  action="store_true", help='flag, if present - remove input directory with DICOMs')
     parser.add_argument('-nii', action="store_true", help='flag, if present - create Nifti image')
     parser.add_argument('-zip', action="store_true", help='flag, if present - create Zip archive with selected DICOMs files')
-    parser.add_argument('-anon', action="store_true", help='flag, if present - anonymize DICOM files in directory')
     parser.add_argument('wdir')
     args=parser.parse_args()
     retSiz=sizDef
@@ -364,6 +350,12 @@ def parseCMD(argv):
         exitError(RET_BAD_CMD_ARGS, metaInfo=argv)
     if args.out is not None:
         retOfile=args.out
+    # if args.out is not None:
+    #     odir=os.path.dirname(args.out)
+    #     if os.path.isdir(odir):
+    #         retOfile=args.out
+    #     else:
+    #         exitError(RET_DIR_NOTFOUND, metaInfo=odir)
     ret=args
     ret.wdir=retWdir
     ret.siz=retSiz
@@ -400,9 +392,6 @@ if __name__=='__main__':
     foutNiiOrig='%s_orig.nii.gz' % foutPrefix
     foutNiiResiz='%s.nii.gz' % foutPrefix
     foutZip='%s.zip' % foutPrefix
-    # Anonymize DICOM files
-    if retCMD.anon:
-        pass
     # Save preview image
     try:
         sk.io.imsave(foutImg,imgPreviewResiz)
