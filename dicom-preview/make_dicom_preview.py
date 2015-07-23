@@ -28,7 +28,7 @@ DEF_MIN_NUMBER_OF_SLICES    = 10
 DEF_NII_PREVIEW_SIZE        = (128,128,60)
 DEF_DCM2NII_EXE             = "dcm2nii"
 DEF_DCMANON_EXE             = "gdcmanon"
-DEF_DCMDIRTMP_PREF          = "-tmp_%" % time.time()
+DEF_DCMDIRTMP_PREF          = "-tmp_%s" % time.time()
 
 RET_SUCCESS                 = 0
 RET_FILE_NOTFOUND           = 1
@@ -48,6 +48,7 @@ RET_NII_RESIZ_AND_SAVE      = 14
 RET_ERR_CREATE_ZIP          = 15
 RET_ERR_REMOVE_DIR          = 16
 RET_ERR_MOVE_DIR            = 17
+RET_ERR_ANONYMIZAION        = 18
 errorCodes = {
     RET_SUCCESS:            'Success',
     RET_FILE_NOTFOUND:      'File not found',
@@ -88,13 +89,17 @@ def exitError(errCode, isPrintError=True, metaInfo=None):
 """
 Find recursively all files in directory with predefined file extension
 """
-def getListFiles(wdir, parLstExt=lstExt, maxNumFiles=2000):
+def getListFiles(wdir, parLstExt=lstExt, maxNumFiles=2000, isRelPath=True):
     ret=[]
     cnt=0
     for root,_,files in os.walk(wdir):
         for ff in files:
             if ff.endswith(tuple(parLstExt)):
-                ret.append(os.path.join(root, ff))
+                totPath=os.path.join(root, ff)
+                if isRelPath:
+                    ret.append(totPath)
+                else:
+                    ret.append(os.path.relpath(totPath, wdir))
                 cnt+=1
                 if cnt>maxNumFiles:
                     break
@@ -315,15 +320,67 @@ def saveListFilesToZip(lstFiles, foutZip, pref=None):
         except:
             exitError(RET_ERR_CREATE_ZIP, metaInfo=foutZip)
 
+"""
+Anonymization function #1: one call of gdcmanonб but
+is unstable in the case of a partial anonymization
+of data
+"""
 def makeAnonymization(dirDICOM):
+    isError=False
     if not os.path.isdir(dirDICOM):
         exitError(RET_DIR_NOTFOUND, metaInfo=dirDICOM)
     dirDICOMtmp="%s%s" % (dirDICOM,DEF_DCMDIRTMP_PREF)
     try:
-        pass
+        shutil.move(dirDICOM,dirDICOMtmp)
     except:
-        pass
-        # exitError(RET)
+        exitError(RET_ERR_MOVE_DIR, metaInfo=dirDICOMtmp)
+    tmpCmd="%s -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, dirDICOMtmp, dirDICOM)
+    retCode=-1
+    try:
+        retCode=os.system(tmpCmd)
+    except Exception as e:
+        print e.message
+    if not os.path.isdir(dirDICOM):
+        isError=True
+        shutil.move(dirDICOMtmp,dirDICOM)
+    else:
+        if retCode!=0:
+            shutil.rmtree(dirDICOM)
+            shutil.move(dirDICOMtmp,dirDICOM)
+    return isError
+
+"""
+Anonymization function #2: one call per DICOM file, but
+work stable - if gdcmanon return error - just copy file
+"""
+def makeAnonymization2(dirDICOM):
+    isError=False
+    if not os.path.isdir(dirDICOM):
+        exitError(RET_DIR_NOTFOUND, metaInfo=dirDICOM)
+    dirDICOMtmp="%s%s" % (dirDICOM,DEF_DCMDIRTMP_PREF)
+    try:
+        shutil.move(dirDICOM,dirDICOMtmp)
+    except:
+        exitError(RET_ERR_MOVE_DIR, metaInfo=dirDICOMtmp)
+    lstFDCMRel=getListFiles(dirDICOMtmp, parLstExt=lstExt, isRelPath=False)
+    cntTot=len(lstFDCMRel)
+    cntGood=0
+    for ll in lstFDCMRel:
+        fdcmInp=os.path.join(dirDICOMtmp, ll)
+        fdcmOut=os.path.join(dirDICOM, ll)
+        dirOut=os.path.dirname(fdcmOut)
+        if not os.path.isdir(dirOut):
+            os.makedirs(dirOut)
+        tmpCmd="%s -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, fdcmInp, fdcmOut)
+        retCode=os.system(tmpCmd)
+        if retCode==0:
+            cntGood+=1
+        else:
+            shutil.copy2(fdcmInp, fdcmOut)
+    if cntGood!=cntTot:
+        shutil.rmtree(dirDICOM)
+        shutil.move(dirDICOMtmp,dirDICOM)
+    return isError
 
 """
 Parse Command Line Arguments
@@ -375,10 +432,16 @@ def parseCMD(argv):
 if __name__=='__main__':
     retCMD=parseCMD(sys.argv)
     wdir=retCMD.wdir
+    wdirRoot=os.path.dirname(wdir)
+    # (1) Anonymize DICOM files
+    if retCMD.anon:
+        if not makeAnonymization2(wdir):
+            errorCodes(RET_ERR_ANONYMIZAION, metaInfo=wdir)
+    sys.exit(1)
+    # (2) Preprocess and generate preview
     lstDICOM=readDICOMSeries(wdir)
     lstData,bestKey=findBestDICOMSeries(lstDICOM)
     imgPreviewRet=generatePreviewOutput(lstData)
-    #
     imgPreviewResiz=imgPreviewRet[0]
     newSize=retCMD.siz
     try:
@@ -386,7 +449,6 @@ if __name__=='__main__':
     except:
         exitError(RET_ERR_RESIZ_IMAGE, metaInfo="size=%s" % newSize)
     #
-    wdirRoot=os.path.dirname(wdir)
     studyId=imgPreviewRet[1] #os.path.basename(wdir)
     foutPrefix=os.path.join(wdirRoot, studyId)
     if retCMD.out is not None:
@@ -400,22 +462,19 @@ if __name__=='__main__':
     foutNiiOrig='%s_orig.nii.gz' % foutPrefix
     foutNiiResiz='%s.nii.gz' % foutPrefix
     foutZip='%s.zip' % foutPrefix
-    # Anonymize DICOM files
-    if retCMD.anon:
-        pass
-    # Save preview image
+    # (3) Save preview image
     try:
         sk.io.imsave(foutImg,imgPreviewResiz)
     except:
         exitError(RET_ERR_WRITE_IMAGE, metaInfo=foutImg)
-    # Save Nifti data
+    # (4) Save Nifti data
     if retCMD.nii:
         convertDICOM2Nifti(lstData[1][0], foutNiiOrig)
         resizeNifti(foutNiiOrig, foutNiiResiz)
-    # Prepare DICOM Zip archive
+    # (5) Prepare DICOM Zip archive
     if retCMD.zip:
         saveListFilesToZip(lstData[1], foutZip, pref=imgPreviewRet[1])
-    # Clean input data
+    # (6) Clean input data
     if retCMD.rm:
         try:
             shutil.rmtree(wdir)
