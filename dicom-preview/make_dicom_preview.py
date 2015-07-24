@@ -3,6 +3,7 @@
 __author__ = 'ar'
 
 
+import locale
 import dicom
 import nibabel as nib
 import zipfile
@@ -24,7 +25,7 @@ import inspect
 
 
 #########################################
-DEF_MIN_NUMBER_OF_SLICES    = 10
+DEF_MIN_NUMBER_OF_SLICES    = 0
 DEF_NII_PREVIEW_SIZE        = (128,128,60)
 DEF_DCM2NII_EXE             = "dcm2nii"
 DEF_DCMANON_EXE             = "gdcmanon"
@@ -66,7 +67,8 @@ errorCodes = {
     RET_CONV_NII_NOTFOUND:  'Incorrect conversion DICOM->NII.GZ: output file not found',
     RET_NII_RESIZ_AND_SAVE: 'Cant convert and save Nifti Image',
     RET_ERR_CREATE_ZIP:     'Cant create Zip archive',
-    RET_ERR_REMOVE_DIR:     'Cant remove directory'
+    RET_ERR_REMOVE_DIR:     'Cant remove directory',
+    RET_ERR_ANONYMIZAION:   'Incorrect data in anonymization (maybe data already anonymized)'
 }
 lstExt=['.dcm', '.dicom', '.Dicom', '.Dcm']
 
@@ -96,7 +98,7 @@ def getListFiles(wdir, parLstExt=lstExt, maxNumFiles=2000, isRelPath=True):
         for ff in files:
             if ff.endswith(tuple(parLstExt)):
                 totPath=os.path.join(root, ff)
-                if isRelPath:
+                if not isRelPath:
                     ret.append(totPath)
                 else:
                     ret.append(os.path.relpath(totPath, wdir))
@@ -105,13 +107,17 @@ def getListFiles(wdir, parLstExt=lstExt, maxNumFiles=2000, isRelPath=True):
                     break
     return ret
 
+def dicom_read_helper(fdcm, stop_before_pixels=False):
+    _,tcodec=locale.getdefaultlocale()
+    return dicom.read_file(fdcm.decode(tcodec), stop_before_pixels=stop_before_pixels)
+
 """
 Scan recursively directory, find DICOM files
-and prepare Dictionary with a key=(PatientID, StudyID, SeriesNumber)
+and prepare Dictionary with a key=(PatientID, StudyID, SeriesNumber, Modality)
 and values like (#SliceNumber, pathToDICOMSLice)
 """
 def readDICOMSeries(wdir):
-    lstDICOM=getListFiles(wdir)
+    lstDICOM=getListFiles(wdir,isRelPath=False)
     numDICOM=len(lstDICOM)
     dictDICOM={}
     if numDICOM>0:
@@ -119,11 +125,11 @@ def readDICOMSeries(wdir):
             for ii in lstDICOM:
                 dcm=None
                 try:
-                    dcm=dicom.read_file(ii, stop_before_pixels=True)
+                    dcm=dicom_read_helper(ii, stop_before_pixels=True) #dicom.read_file(ii, stop_before_pixels=True)
                 except:
                     exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
                 if dcm is not None:
-                    tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID)
+                    tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID, dcm.Modality)
                     tval=(dcm.InstanceNumber, ii)
                     if not dictDICOM.has_key(tkey):
                         dictDICOM[tkey]=[]
@@ -196,7 +202,7 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
     for ii in reversed(xrange(numFn)):
         tfn=lstFn[ii]
         try:
-            tdcm=dicom.read_file(tfn, stop_before_pixels=False)
+            tdcm=dicom_read_helper(tfn, stop_before_pixels=False) #dicom.read_file(tfn, stop_before_pixels=False)
             nr=tdcm.Rows
             nc=tdcm.Columns
             dcmStudyId=tdcm.StudyInstanceUID
@@ -326,7 +332,7 @@ is unstable in the case of a partial anonymization
 of data
 """
 def makeAnonymization(dirDICOM):
-    isError=False
+    isNoError=True
     if not os.path.isdir(dirDICOM):
         exitError(RET_DIR_NOTFOUND, metaInfo=dirDICOM)
     dirDICOMtmp="%s%s" % (dirDICOM,DEF_DCMDIRTMP_PREF)
@@ -341,20 +347,20 @@ def makeAnonymization(dirDICOM):
     except Exception as e:
         print e.message
     if not os.path.isdir(dirDICOM):
-        isError=True
+        isNoError=False
         shutil.move(dirDICOMtmp,dirDICOM)
     else:
         if retCode!=0:
             shutil.rmtree(dirDICOM)
             shutil.move(dirDICOMtmp,dirDICOM)
-    return isError
+    return isNoError
 
 """
 Anonymization function #2: one call per DICOM file, but
 work stable - if gdcmanon return error - just copy file
 """
-def makeAnonymization2(dirDICOM):
-    isError=False
+def makeAnonymization2(dirDICOM, isCheckGDCMError=True, isRemoveTmpDir=False):
+    isNoError=True
     if not os.path.isdir(dirDICOM):
         exitError(RET_DIR_NOTFOUND, metaInfo=dirDICOM)
     dirDICOMtmp="%s%s" % (dirDICOM,DEF_DCMDIRTMP_PREF)
@@ -362,7 +368,7 @@ def makeAnonymization2(dirDICOM):
         shutil.move(dirDICOM,dirDICOMtmp)
     except:
         exitError(RET_ERR_MOVE_DIR, metaInfo=dirDICOMtmp)
-    lstFDCMRel=getListFiles(dirDICOMtmp, parLstExt=lstExt, isRelPath=False)
+    lstFDCMRel=getListFiles(dirDICOMtmp, parLstExt=lstExt, isRelPath=True)
     cntTot=len(lstFDCMRel)
     cntGood=0
     for ll in lstFDCMRel:
@@ -377,10 +383,14 @@ def makeAnonymization2(dirDICOM):
             cntGood+=1
         else:
             shutil.copy2(fdcmInp, fdcmOut)
-    if cntGood!=cntTot:
-        shutil.rmtree(dirDICOM)
-        shutil.move(dirDICOMtmp,dirDICOM)
-    return isError
+    if isCheckGDCMError:
+        if cntGood!=cntTot:
+            isNoError=False
+            shutil.rmtree(dirDICOM)
+            shutil.move(dirDICOMtmp,dirDICOM)
+    if isRemoveTmpDir:
+        shutil.rmtree(dirDICOMtmp)
+    return isNoError
 
 """
 Parse Command Line Arguments
@@ -435,11 +445,13 @@ if __name__=='__main__':
     wdirRoot=os.path.dirname(wdir)
     # (1) Anonymize DICOM files
     if retCMD.anon:
-        if not makeAnonymization2(wdir):
-            errorCodes(RET_ERR_ANONYMIZAION, metaInfo=wdir)
-    sys.exit(1)
+        if not makeAnonymization2(wdir, isCheckGDCMError=False, isRemoveTmpDir=True):
+            exitError(RET_ERR_ANONYMIZAION, metaInfo=wdir)
     # (2) Preprocess and generate preview
     lstDICOM=readDICOMSeries(wdir)
+    for ii in lstDICOM:
+        print ii
+    sys.exit(2)
     lstData,bestKey=findBestDICOMSeries(lstDICOM)
     imgPreviewRet=generatePreviewOutput(lstData)
     imgPreviewResiz=imgPreviewRet[0]
