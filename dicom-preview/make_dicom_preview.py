@@ -22,7 +22,7 @@ import skimage.draw
 import skimage.io
 import matplotlib.pyplot as plt
 import inspect
-
+from nipype.interfaces.dcmstack import DcmStack
 
 #########################################
 DEF_MIN_NUMBER_OF_SLICES    = 0
@@ -91,7 +91,7 @@ def exitError(errCode, isPrintError=True, metaInfo=None):
 """
 Find recursively all files in directory with predefined file extension
 """
-def getListFiles(wdir, parLstExt=lstExt, maxNumFiles=2000, isRelPath=True):
+def getListFiles(wdir, parLstExt=lstExt, maxNumFiles=2000, isRelPath=False):
     ret=[]
     cnt=0
     for root,_,files in os.walk(wdir):
@@ -128,7 +128,7 @@ def readDICOMSeries(wdir):
             except:
                 exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
             if dcm is not None:
-                tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID, dcm.Modality)
+                tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID, dcm.ImageNum, dcm.Modality)
                 tval=(dcm.InstanceNumber, ii)
                 if not dictDICOM.has_key(tkey):
                     dictDICOM[tkey]=[]
@@ -141,9 +141,61 @@ def readDICOMSeries(wdir):
         exitError(RET_SMALL_NUM_DICOM)
     return dictDICOM
 
+"""
+Version #2
+Algorithm:
+    (1) scan directory recursively and find all DICOM-headers
+    (2) find all study
+    (3) find all series for study, if:
+        (a) Modality=XRay -> generate preview
+        (b) Modality=CT   -> search largest CT-series and generate 3D-preview for it
+    -------
+    :return: dict-structure
+        {
+            StudyInstanceUID_1: {
+
+            },
+            ...
+            StudyInstanceUID_N: {
+            }
+        }
+"""
+def readDICOMSeries2(wdir):
+    lstFDCM=getListFiles(wdir,isRelPath=False)
+    # 1. Read DICOM Headers
+    lstDCM=[]
+    lstDCMPath=[]
+    for ii in lstFDCM:
+        try:
+            tdcm=dicom_read_helper(ii, stop_before_pixels=True)
+            lstDCM.append(tdcm)
+            lstDCMPath.append(ii)
+        except:
+            exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
+    # 2. find all StudiesID
+    dictStudies={}
+    dictStudiesPath={}
+    for ii in xrange(len(lstDCM)):
+        tdcm=lstDCM[ii]
+        tpath=lstDCMPath[ii]
+        tkey=(tdcm.StudyID, tdcm.StudyInstanceUID)
+        if not dictStudies.has_key(tkey):
+            dictStudies[tkey]=[]
+            dictStudiesPath[tkey]=[]
+        dictStudies[tkey].append(tdcm)
+        dictStudiesPath[tkey].append(tpath)
+    # 3. find all SeriesID for Studies, and reorganize data
+    return dictStudiesPath
+
+def printDICOMSeries2(dictDICOMSeries):
+    cnt=0
+    for ii in dictDICOMSeries.keys():
+        print "(",cnt,"): [", ii, "] -->"
+        for jj in dictDICOMSeries[ii]:
+            print "\t\t", jj
+
 def mergeDICOMSeries(dictDICOM):
     retMerged={}
-
     return retMerged
 
 """
@@ -450,9 +502,28 @@ if __name__=='__main__':
         if not makeAnonymization2(wdir, isCheckGDCMError=False, isRemoveTmpDir=True):
             exitError(RET_ERR_ANONYMIZAION, metaInfo=wdir)
     # (2) Preprocess and generate preview
-    lstDICOM=readDICOMSeries(wdir)
-    for ii in lstDICOM:
-        print ii, " : ", len(lstDICOM[ii])
+    # lstDICOM=readDICOMSeries(wdir)
+    # for ii in lstDICOM:
+    #     print ii, " : ", len(lstDICOM[ii])
+    # lstFDCM=getListFiles(wdir, isRelPath=False)
+
+    # (2) Test DICOM series v.2
+    lstDICOM=readDICOMSeries2(wdir)
+    printDICOMSeries2(lstDICOM)
+
+    # stacker = DcmStack()
+    # stacker.inputs.dicom_files = wdir
+    # stacker.run()
+    # print stacker
+
+    # lstId=[]
+    # for ii in lstFDCM:
+    #     dcm=dicom.read_file(ii, stop_before_pixels=True)
+    #     tmpId=(dcm.SeriesInstanceUID)#,dcm.InstanceNumber)
+    #     lstId.append(tmpId)
+    #     print tmpId
+    # print "-----------"
+    # print list(set(lstId))
     sys.exit(2)
     lstData,bestKey=findBestDICOMSeries(lstDICOM)
     imgPreviewRet=generatePreviewOutput(lstData)
