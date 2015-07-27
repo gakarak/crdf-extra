@@ -113,36 +113,38 @@ def dicom_read_helper(fdcm, stop_before_pixels=False):
 
 """
 Scan recursively directory, find DICOM files
-and prepare Dictionary with a key=(PatientID, StudyID, SeriesNumber, Modality)
+and prepare Dictionary with a key=(PatientID, StudyID, SeriesNumber, StudyInstanceUID, Modality)
 and values like (#SliceNumber, pathToDICOMSLice)
 """
 def readDICOMSeries(wdir):
     lstDICOM=getListFiles(wdir,isRelPath=False)
     numDICOM=len(lstDICOM)
     dictDICOM={}
-    if numDICOM>0:
-        if numDICOM>DEF_MIN_NUMBER_OF_SLICES:
-            for ii in lstDICOM:
-                dcm=None
-                try:
-                    dcm=dicom_read_helper(ii, stop_before_pixels=True) #dicom.read_file(ii, stop_before_pixels=True)
-                except:
-                    exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
-                if dcm is not None:
-                    tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID, dcm.Modality)
-                    tval=(dcm.InstanceNumber, ii)
-                    if not dictDICOM.has_key(tkey):
-                        dictDICOM[tkey]=[]
-                    dictDICOM[tkey].append(tval)
-                else:
-                    exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
-            if len(dictDICOM)<1:
-                exitError(RET_SERIES_NOTFOUND, metaInfo=wdir)
-        else:
-            exitError(RET_SMALL_NUM_DICOM)
+    if numDICOM>DEF_MIN_NUMBER_OF_SLICES:
+        for ii in lstDICOM:
+            dcm=None
+            try:
+                dcm=dicom_read_helper(ii, stop_before_pixels=True) #dicom.read_file(ii, stop_before_pixels=True)
+            except:
+                exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
+            if dcm is not None:
+                tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID, dcm.Modality)
+                tval=(dcm.InstanceNumber, ii)
+                if not dictDICOM.has_key(tkey):
+                    dictDICOM[tkey]=[]
+                dictDICOM[tkey].append(tval)
+            else:
+                exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
+        if len(dictDICOM)<1:
+            exitError(RET_SERIES_NOTFOUND, metaInfo=wdir)
     else:
-        exitError(RET_DICOM_NOTFOUND, metaInfo=wdir)
+        exitError(RET_SMALL_NUM_DICOM)
     return dictDICOM
+
+def mergeDICOMSeries(dictDICOM):
+    retMerged={}
+
+    return retMerged
 
 """
 Select DICOM series with maximum number of slice
@@ -177,9 +179,9 @@ def findBestDICOMSeries(dictDICOM):
     return (ret,bestKey)
 
 """
-Normalize image by Lung-preset
+Normalize CT image by Lung-preset
 """
-def calcNormImage(img):
+def calcNormImageCT(img):
     timg=img.astype(np.float)
     vMin=-1000.
     vMax=+200.
@@ -221,10 +223,10 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
     lstImg=[]
     for pp in lstZp:
         tidx=round(pp*numFn)
-        lstImg.append(np.pad(calcNormImage(data[:,:,tidx]), sizPad, 'constant', constant_values=(0)))
+        lstImg.append(np.pad(calcNormImageCT(data[:,:,tidx]), sizPad, 'constant', constant_values=(0)))
     imgX=np.rot90(data[data.shape[0]/2,:,:])
     imgX=sk.transform.resize(imgX.copy(), data.shape[:2], order=4)
-    lstImg.append(np.pad(calcNormImage(imgX), sizPad, 'constant', constant_values=(0)))
+    lstImg.append(np.pad(calcNormImageCT(imgX), sizPad, 'constant', constant_values=(0)))
     #
     lstImgRGB=[]
     for ii in lstImg:
@@ -327,7 +329,7 @@ def saveListFilesToZip(lstFiles, foutZip, pref=None):
             exitError(RET_ERR_CREATE_ZIP, metaInfo=foutZip)
 
 """
-Anonymization function #1: one call of gdcmanonб but
+Anonymization function #1: one call of gdcmanon but
 is unstable in the case of a partial anonymization
 of data
 """
@@ -450,7 +452,7 @@ if __name__=='__main__':
     # (2) Preprocess and generate preview
     lstDICOM=readDICOMSeries(wdir)
     for ii in lstDICOM:
-        print ii
+        print ii, " : ", len(lstDICOM[ii])
     sys.exit(2)
     lstData,bestKey=findBestDICOMSeries(lstDICOM)
     imgPreviewRet=generatePreviewOutput(lstData)
