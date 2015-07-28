@@ -22,7 +22,7 @@ import skimage.draw
 import skimage.io
 import matplotlib.pyplot as plt
 import inspect
-from nipype.interfaces.dcmstack import DcmStack
+# from nipype.interfaces.dcmstack import DcmStack
 
 #########################################
 DEF_MIN_NUMBER_OF_SLICES    = 0
@@ -141,6 +141,33 @@ def readDICOMSeries(wdir):
         exitError(RET_SMALL_NUM_DICOM)
     return dictDICOM
 
+
+class DCMHelper:
+    def __init__(self, parPath, parDCM=None):
+        self.dcm=parDCM
+        if not parDCM:
+            try:
+                self.dcm=dicom_read_helper(parPath, stop_before_pixels=True)
+                self.path=parPath
+            except:
+                self.path=None
+        try:
+            self.keyPos=int(self.dcm.InstanceNumber)
+        except:
+            self.keyPos=10e6
+    def getStudyKey(self):
+        return (self.dcm.StudyInstanceUID, self.dcm.StudyID)
+    def getSeriesKey(self):
+        return self.dcm.SeriesInstanceUID
+    def toString(self):
+        return "%s : %s : %s" % (self.path, self.dcm.SeriesInstanceUID, self.keyPos)
+    def __repr__(self):
+        return self.toString()
+    def __str__(self):
+        return self.toString()
+    def __lt__(self, other):
+        return self.keyPos<other.keyPos
+
 """
 Version #2
 Algorithm:
@@ -174,18 +201,16 @@ def readDICOMSeries2(wdir):
             exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
     # 2. find all StudiesID
     dictStudies={}
-    dictStudiesPath={}
     for ii in xrange(len(lstDCM)):
         tdcm=lstDCM[ii]
         tpath=lstDCMPath[ii]
         tkey=(tdcm.StudyID, tdcm.StudyInstanceUID)
+        tval=DCMHelper(tdcm,tpath)
         if not dictStudies.has_key(tkey):
             dictStudies[tkey]=[]
-            dictStudiesPath[tkey]=[]
-        dictStudies[tkey].append(tdcm)
-        dictStudiesPath[tkey].append(tpath)
+        dictStudies[tkey].append(tval)
     # 3. find all SeriesID for Studies, and reorganize data
-    return dictStudiesPath
+    return dictStudies
 
 def printDICOMSeries2(dictDICOMSeries):
     cnt=0
@@ -193,6 +218,7 @@ def printDICOMSeries2(dictDICOMSeries):
         print "(",cnt,"): [", ii, "] -->"
         for jj in dictDICOMSeries[ii]:
             print "\t\t", jj
+        cnt+=1
 
 def mergeDICOMSeries(dictDICOM):
     retMerged={}
@@ -508,13 +534,16 @@ if __name__=='__main__':
     # lstFDCM=getListFiles(wdir, isRelPath=False)
 
     # (2) Test DICOM series v.2
-    lstDICOM=readDICOMSeries2(wdir)
-    printDICOMSeries2(lstDICOM)
+    # lstDICOM=readDICOMSeries2(wdir)
+    # printDICOMSeries2(lstDICOM)
 
-    # stacker = DcmStack()
-    # stacker.inputs.dicom_files = wdir
-    # stacker.run()
-    # print stacker
+    lstFDCM=getListFiles(wdir)
+    lstDCM=[]
+    for ii in lstFDCM:
+        lstDCM.append(DCMHelper(ii))
+    lstDCM.sort()
+    for ii in lstDCM:
+        print ii
 
     # lstId=[]
     # for ii in lstFDCM:
