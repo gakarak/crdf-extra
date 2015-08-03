@@ -1,2 +1,3 @@
 /.idea/
 *.py-bk
+/make_dicom_preview_bk.py
