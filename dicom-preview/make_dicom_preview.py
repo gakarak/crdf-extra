@@ -650,7 +650,7 @@ if __name__=='__main__':
     wdirRoot=os.path.dirname(wdir)
     # (1) Anonymize DICOM files
     if retCMD.anon:
-        print ":::makeAnonymization2()"
+        print ":::makeAnonymization3()"
         if not makeAnonymization3(wdir, isCheckGDCMError=False, isRemoveTmpDir=False):
             exitError(RET_ERR_ANONYMIZAION, metaInfo=wdir)
 
