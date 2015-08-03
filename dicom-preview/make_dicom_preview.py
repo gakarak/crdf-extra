@@ -7,6 +7,7 @@ import locale
 import dicom
 import nibabel as nib
 import zipfile
+import tempfile
 
 import time
 import glob
@@ -21,15 +22,18 @@ import skimage.color
 import skimage.draw
 import skimage.io
 import matplotlib.pyplot as plt
+import cv2
 import inspect
-# from nipype.interfaces.dcmstack import DcmStack
 
 #########################################
 DEF_MIN_NUMBER_OF_SLICES    = 0
-DEF_NII_PREVIEW_SIZE        = (128,128,60)
+DEF_MIN_NUM_FILES_IN_SERIES = 25
+DEF_NII_PREVIEW_SIZE_CT     = (192,192,60)
+DEF_NII_PREVIEW_SIZE_CR     = 1024
 DEF_DCM2NII_EXE             = "dcm2nii"
 DEF_DCMANON_EXE             = "gdcmanon"
 DEF_DCMDIRTMP_PREF          = "-tmp_%s" % time.time()
+DEF_FOUT_FORMAT             = "%s-%s" # StudyID, SeriesNumber
 
 RET_SUCCESS                 = 0
 RET_FILE_NOTFOUND           = 1
@@ -50,6 +54,7 @@ RET_ERR_CREATE_ZIP          = 15
 RET_ERR_REMOVE_DIR          = 16
 RET_ERR_MOVE_DIR            = 17
 RET_ERR_ANONYMIZAION        = 18
+RET_ERR_CREATE_DIR          = 19
 errorCodes = {
     RET_SUCCESS:            'Success',
     RET_FILE_NOTFOUND:      'File not found',
@@ -68,7 +73,8 @@ errorCodes = {
     RET_NII_RESIZ_AND_SAVE: 'Cant convert and save Nifti Image',
     RET_ERR_CREATE_ZIP:     'Cant create Zip archive',
     RET_ERR_REMOVE_DIR:     'Cant remove directory',
-    RET_ERR_ANONYMIZAION:   'Incorrect data in anonymization (maybe data already anonymized)'
+    RET_ERR_ANONYMIZAION:   'Incorrect data in anonymization (maybe data already anonymized)',
+    RET_ERR_CREATE_DIR:     'Cant create directory'
 }
 lstExt=['.dcm', '.dicom', '.Dicom', '.Dcm']
 
@@ -111,40 +117,10 @@ def dicom_read_helper(fdcm, stop_before_pixels=False):
     _,tcodec=locale.getdefaultlocale()
     return dicom.read_file(fdcm.decode(tcodec), stop_before_pixels=stop_before_pixels)
 
-"""
-Scan recursively directory, find DICOM files
-and prepare Dictionary with a key=(PatientID, StudyID, SeriesNumber, StudyInstanceUID, Modality)
-and values like (#SliceNumber, pathToDICOMSLice)
-"""
-def readDICOMSeries(wdir):
-    lstDICOM=getListFiles(wdir,isRelPath=False)
-    numDICOM=len(lstDICOM)
-    dictDICOM={}
-    if numDICOM>DEF_MIN_NUMBER_OF_SLICES:
-        for ii in lstDICOM:
-            dcm=None
-            try:
-                dcm=dicom_read_helper(ii, stop_before_pixels=True) #dicom.read_file(ii, stop_before_pixels=True)
-            except:
-                exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
-            if dcm is not None:
-                tkey=(dcm.PatientID, dcm.StudyID, dcm.SeriesNumber, dcm.StudyInstanceUID, dcm.ImageNum, dcm.Modality)
-                tval=(dcm.InstanceNumber, ii)
-                if not dictDICOM.has_key(tkey):
-                    dictDICOM[tkey]=[]
-                dictDICOM[tkey].append(tval)
-            else:
-                exitError(RET_READ_ERROR_DICOM, metaInfo=ii)
-        if len(dictDICOM)<1:
-            exitError(RET_SERIES_NOTFOUND, metaInfo=wdir)
-    else:
-        exitError(RET_SMALL_NUM_DICOM)
-    return dictDICOM
-
-
 class DCMHelper:
     def __init__(self, parPath, parDCM=None):
         self.dcm=parDCM
+        self.path=parPath
         if not parDCM:
             try:
                 self.dcm=dicom_read_helper(parPath, stop_before_pixels=True)
@@ -160,7 +136,7 @@ class DCMHelper:
     def getSeriesKey(self):
         return self.dcm.SeriesInstanceUID
     def toString(self):
-        return "%s : %s : %s" % (self.path, self.dcm.SeriesInstanceUID, self.keyPos)
+        return "%s (%s) : %s-%s : %s" % (self.path, self.dcm.Modality, self.dcm.SeriesInstanceUID, self.dcm.SeriesNumber, self.keyPos)
     def __repr__(self):
         return self.toString()
     def __str__(self):
@@ -204,57 +180,77 @@ def readDICOMSeries2(wdir):
     for ii in xrange(len(lstDCM)):
         tdcm=lstDCM[ii]
         tpath=lstDCMPath[ii]
-        tkey=(tdcm.StudyID, tdcm.StudyInstanceUID)
-        tval=DCMHelper(tdcm,tpath)
-        if not dictStudies.has_key(tkey):
-            dictStudies[tkey]=[]
-        dictStudies[tkey].append(tval)
+        tkeyStudy=(tdcm.StudyInstanceUID, tdcm.StudyID, tdcm.Modality)
+        tKeySeries=(tdcm.StudyInstanceUID, tdcm.SeriesInstanceUID, tdcm.SeriesNumber, tdcm.Modality)
+        tval=DCMHelper(tpath, tdcm)
+        if not dictStudies.has_key(tkeyStudy):
+            dictStudies[tkeyStudy]={}
+        if not dictStudies[tkeyStudy].has_key(tKeySeries):
+            dictStudies[tkeyStudy][tKeySeries]=[]
+        dictStudies[tkeyStudy][tKeySeries].append(tval)
     # 3. find all SeriesID for Studies, and reorganize data
+    tmpStudyKeys=dictStudies.keys()
+    for kkStudy in tmpStudyKeys:
+        tmpSeriesKeys=dictStudies[kkStudy].keys()
+        for kkSeries in tmpSeriesKeys:
+            tmpValues=dictStudies[kkStudy][kkSeries]
+            tmpValues.sort()
+        # print type(tmpValues)
     return dictStudies
 
-def printDICOMSeries2(dictDICOMSeries):
+def printDICOMSeries2(dictDICOMSeries, isQuickPrint=False):
     cnt=0
-    for ii in dictDICOMSeries.keys():
-        print "(",cnt,"): [", ii, "] -->"
-        for jj in dictDICOMSeries[ii]:
-            print "\t\t", jj
+    for iiStudy in dictDICOMSeries.keys():
+        print "Study {",cnt,"}: [", iiStudy, "] -->"
+        tmpDictSeries=dictDICOMSeries[iiStudy]
+        cntSeries=0
+        for iiSeries in tmpDictSeries.keys():
+            if not isQuickPrint:
+                print "\t\t(",cntSeries,"): [", iiSeries, "] -->"
+                for jj in tmpDictSeries[iiSeries]:
+                    print "\t\t\t\t", jj
+            else:
+                print "\t\t(",cntSeries,"): [", iiSeries, "] --> #%d DICOM-files" % len(tmpDictSeries[iiSeries])
+            cntSeries+=1
         cnt+=1
 
-def mergeDICOMSeries(dictDICOM):
-    retMerged={}
-    return retMerged
-
-"""
-Select DICOM series with maximum number of slice
-"""
-def findBestDICOMSeries(dictDICOM):
-    ret=None
-    maxSlices=-1
-    bestKey=None
-    for kk in dictDICOM.keys():
-        tnum=len(dictDICOM[kk])
-        if tnum>maxSlices:
-            maxSlices=tnum
-            bestKey=kk
-    # if maxSlices<DEF_MIN_NUMBER_OF_SLICES:
-    #     exitError(RET_SMALL_NUM_SLICES)
-    if bestKey is not None:
-        arrSiD=[]
-        lstDCM=dictDICOM[bestKey]
-        for ii in lstDCM:
-            try:
-                arrSiD.append(int(ii[0]))
-            except:
-                exitError(RET_BAD_SLICE_ID, metaInfo=ii[1])
-        sortIdx=np.argsort(arrSiD)
-        arrID=[]
-        arrFN=[]
-        for ii in sortIdx:
-            tval=lstDCM[ii]
-            arrID.append(arrSiD[ii])
-            arrFN.append(tval[1])
-        ret=(arrID, arrFN)
-    return (ret,bestKey)
+def resizeImageToSize(img, sizNew, parBorder=0, parInterpolation=2L): # parInterpolation=cv2.INTER_CUBIC
+    if len(img.shape)<3:
+        img=cv2.cvtColor(img,cv2.COLOR_GRAY2BGR)
+    sizImg=img.shape
+    if (sizNew[0]<2) or (sizNew[1]<2) or (sizImg[0]<2) or (sizImg[1]<2):
+        return None
+    sizImgf=np.array(sizImg, np.float)
+    sizNewf=np.array(sizNew, np.float)
+    k1=sizNewf[0]/sizNewf[1]
+    k2=sizImgf[0]/sizImgf[1]
+    eps=np.abs(k1-k2)/np.abs(k1+k2)
+    if eps<0.002:
+        if parBorder<1:
+            return cv2.resize(img, sizNew, interpolation=parInterpolation)
+        else:
+            ret=cv2.resize(img, sizNew, interpolation=parInterpolation)
+            ret=cv2.copyMakeBorder(ret, parBorder,parBorder,parBorder,parBorder, borderType=cv2.BORDER_CONSTANT, value=0)
+            return cv2.resize(ret, sizNew, interpolation=cv2.INTER_CUBIC)
+    #
+    parScl=sizNewf[0]/sizImgf[0]
+    sizImgNewf=np.array( (sizNewf[0], sizImgf[1]*sizNewf[0]/sizImgf[0]),  np.float)
+    if (k2<k1):
+        sizImgNewf=np.array( (sizImgf[0]*sizNewf[1]/sizImgf[1], sizNewf[1]),  np.float)
+        parScl=sizNewf[1]/sizImgf[1]
+    dx=(sizNewf[1]-sizImgNewf[1])/2.
+    dy=(sizNewf[0]-sizImgNewf[0])/2.
+    warpMat=np.zeros((2,3), np.float)
+    warpMat[0,0]=parScl
+    warpMat[1,1]=parScl
+    warpMat[0,2]=+dx
+    warpMat[1,2]=+dy
+    if parBorder<1:
+        return cv2.warpAffine(img, warpMat, sizNew[::-1])
+    else:
+        ret=cv2.warpAffine(img, warpMat, sizNew[::-1])
+        ret=cv2.copyMakeBorder(ret, parBorder,parBorder,parBorder,parBorder, borderType=cv2.BORDER_CONSTANT, value=0)
+        return cv2.resize(ret, sizNew[::-1], interpolation=cv2.INTER_CUBIC)
 
 """
 Normalize CT image by Lung-preset
@@ -269,23 +265,19 @@ def calcNormImageCT(img):
     return ret.astype(np.uint8)
 
 """
-Prepare Preview image on original size
+Prepare preview for CT-Image on original size
 """
-def generatePreviewOutput(lstIdFn, isDebug=False):
-    lstId=lstIdFn[0]
-    lstFn=lstIdFn[1]
-    numFn=len(lstId)
+def makePreviewImageForCT(lstDCMHelper, isDebug=False):
+    numFn=len(lstDCMHelper)
     data=None
     cnt=0
-    dcmStudyId='unknown-study-id'
     sizPad=8
     for ii in reversed(xrange(numFn)):
-        tfn=lstFn[ii]
+        tfn=lstDCMHelper[ii].path
         try:
-            tdcm=dicom_read_helper(tfn, stop_before_pixels=False) #dicom.read_file(tfn, stop_before_pixels=False)
+            tdcm=dicom_read_helper(tfn, stop_before_pixels=False)
             nr=tdcm.Rows
             nc=tdcm.Columns
-            dcmStudyId=tdcm.StudyInstanceUID
             if data is None:
                 data=np.zeros((nr,nc,numFn), dtype=np.float)
             else:
@@ -334,77 +326,148 @@ def generatePreviewOutput(lstIdFn, isDebug=False):
     if isDebug:
         plt.imshow(imgPano)
         plt.show()
-    return (imgPano.copy(), dcmStudyId)
+    ret=cv2.cvtColor(imgPano,cv2.COLOR_RGB2BGR)
+    return ret
+
+def makePreviewImageForCR(lstDCMHelper):
+    fdcm=lstDCMHelper[0].path
+    ret=None
+    try:
+        tdcm=dicom_read_helper(fdcm, stop_before_pixels=False)
+        data=tdcm.pixel_array
+        ret=cv2.normalize(data,None,0,255,cv2.NORM_MINMAX,cv2.CV_8U)
+    except:
+        pass
+    return ret
+
+def preparePreviewForDICOM(lstDICOMDict, outDir, sizPreview):
+    sizW=sizPreview[0]
+    sizH=sizPreview[1]
+    for kkStudy in lstDICOMDict.keys():
+        tmpDictSeries=lstDICOMDict[kkStudy]
+        for kkSeries in tmpDictSeries.keys():
+            tmpModality=kkSeries[3]
+            numFilesInSeries=len(tmpDictSeries[kkSeries])
+            foutPreview=DEF_FOUT_FORMAT % (kkStudy[0], kkSeries[2])
+            foutPreview="%s.%d.%d.jpg" % (foutPreview, sizW, sizH)
+            foutPreview=os.path.join(outDir,foutPreview)
+            if tmpModality=='CT':
+                # print 'CT: ', kkSeries
+                if numFilesInSeries>DEF_MIN_NUM_FILES_IN_SERIES:
+                    imgCT=makePreviewImageForCT(tmpDictSeries[kkSeries], isDebug=False)
+                    if imgCT is not None:
+                        imgCTr=resizeImageToSize(imgCT, tuple(sizPreview))
+                        cv2.imwrite(foutPreview, imgCTr)
+            else:
+                # print 'CR: ', kkSeries
+                imgCR=makePreviewImageForCR(tmpDictSeries[kkSeries])
+                if imgCR is not None:
+                    imgCRr=resizeImageToSize(imgCR, tuple(sizPreview), parBorder=8)
+                    cv2.imwrite(foutPreview, imgCRr)
+
+def makePreviewNifti(fniiInp, fniiOut, newSize=DEF_NII_PREVIEW_SIZE_CT):
+    try:
+        imgNifti=nib.load(fniiInp)
+        data=imgNifti.get_data()
+        if data.shape[2]>1 : # 3D-Image
+            dataNew=sk.transform.resize(data,newSize,order=4, preserve_range=True)
+            oldSize=data.shape
+            affineOld=imgNifti.affine.copy()
+            affineNew=imgNifti.affine.copy()
+            k20_Old=float(oldSize[2])/float(oldSize[0])
+            k20_New=float(newSize[2])/float(newSize[0])
+            for ii in xrange(3):
+                tCoeff=float(newSize[ii])/float(oldSize[ii])
+                if ii==2:
+                    tCoeff=(affineNew[0,0]/affineOld[0,0])*(k20_Old/k20_New)
+                affineNew[ii,ii]*=tCoeff
+                affineNew[ii,3 ]*=tCoeff
+            dataNew=calcNormImageCT(dataNew)
+            niiHdr=imgNifti.header
+            niiHdr.set_data_dtype(np.uint8)
+            imgNiftiResiz=nib.Nifti1Image(dataNew, affineNew, header=niiHdr)
+            nib.save(imgNiftiResiz, fniiOut)
+        else: # 2D-Image
+            maxSize=np.max(data.shape[:2])
+            affineNew=imgNifti.affine.copy()
+            if maxSize>DEF_NII_PREVIEW_SIZE_CR:
+                tCoeff=float(DEF_NII_PREVIEW_SIZE_CR)/float(maxSize)
+                maxSize=DEF_NII_PREVIEW_SIZE_CR
+                newSize=(maxSize, (data.shape[1]*maxSize)/data.shape[0], 1)
+                if data.shape[1]>data.shape[0]:
+                    newSize=((data.shape[0]*maxSize)/data.shape[1], maxSize, 1)
+                dataNew=sk.transform.resize(data,newSize,order=4, preserve_range=True)
+                affineNew[0,0]*=tCoeff
+                affineNew[1,1]*=tCoeff
+            else:
+                dataNew=data
+            dataNew=cv2.normalize(dataNew[:,:,0],None,0,255, cv2.NORM_MINMAX,cv2.CV_8U)
+            niiHdr=imgNifti.header
+            niiHdr.set_data_dtype(np.uint8)
+            imgNiftiResiz=nib.Nifti1Image(dataNew, affineNew, header=niiHdr)
+            nib.save(imgNiftiResiz, fniiOut)
+    except:
+        exitError(RET_NII_RESIZ_AND_SAVE, metaInfo=fniiInp)
+
+def prepareZipForDICOM(lstDICOMDict,outDir, dirRelative, pref=None):
+    for kkStudy in lstDICOMDict.keys():
+        tmpDictSeries=lstDICOMDict[kkStudy]
+        foutZip="%s.zip" % kkStudy[0]
+        foutZip=os.path.join(outDir,foutZip)
+        zObj=zipfile.ZipFile(foutZip, 'w')
+        zipDir='/'
+        if pref is not None:
+            zipDir=pref
+        for kkSeries in tmpDictSeries.keys():
+            tdcmHelperList=tmpDictSeries[kkSeries]
+            for tdcmHelper in tdcmHelperList:
+                tpathRel=os.path.relpath(tdcmHelper.path, dirRelative)
+                if os.path.isfile(tdcmHelper.path):
+                    try:
+                        zObj.write(tdcmHelper.path, tpathRel)
+                    except:
+                        pass
 
 """
 convert DICOM to Nifti with dcm2nii utility
 """
-def convertDICOM2Nifti(fdcm,fniiOut):
-    if os.path.isfile(fdcm):
-        ddir=os.path.dirname(fdcm)
-        cmdLine='%s -a y -e n -r n %s' % (DEF_DCM2NII_EXE, fdcm)
-        # cmdLine='%s -e n -r n %s >/dev/null' % (DEF_DCM2NII_EXE, fdcm)
-        retCode=os.system(cmdLine)
-        lstNii=glob.glob('%s/*.nii*' % ddir)
-        if len(lstNii)>0:
-            fnii=lstNii[0]
-            shutil.move(fnii, fniiOut)
-            if not os.path.isfile(fniiOut):
-                exitError(RET_FILE_NOTFOUND, metaInfo=fniiOut)
-        else:
-            exitError(RET_CONV_NII_NOTFOUND, metaInfo=fdcm)
-    else:
-        exitError(RET_FILE_NOTFOUND, metaInfo=fdcm)
-
-
-"""
-Read, resize and save Nifti image
-"""
-def resizeNifti(fnii, fniiOut, newSize=DEF_NII_PREVIEW_SIZE):
-    if not os.path.isfile(fnii):
-        exitError(RET_FILE_NOTFOUND, metaInfo=fnii)
-    odir=os.path.dirname(fniiOut)
-    if not os.path.isdir(odir):
-        exitError(RET_DIR_NOTFOUND, metaInfo=odir)
-    try:
-        imgNifti=nib.load(fnii)
-        data=imgNifti.get_data()
-        dataNew=sk.transform.resize(data,newSize,order=4, preserve_range=True)
-        oldSize=data.shape
-        affineOld=imgNifti.affine.copy()
-        affineNew=imgNifti.affine.copy()
-        k20_Old=float(oldSize[2])/float(oldSize[0])
-        k20_New=float(newSize[2])/float(newSize[0])
-        for ii in xrange(3):
-            tCoeff=float(newSize[ii])/float(oldSize[ii])
-            if ii==2:
-                tCoeff=(affineNew[0,0]/affineOld[0,0])*(k20_Old/k20_New)
-            affineNew[ii,ii]*=tCoeff
-            affineNew[ii,3 ]*=tCoeff
-        imgNiftiResiz=nib.Nifti1Image(dataNew, affineNew, header=imgNifti.header)
-        nib.save(imgNiftiResiz, fniiOut)
-    except:
-        exitError(RET_NII_RESIZ_AND_SAVE, metaInfo=fnii)
-
-"""
-Export list-of-path to files in Zip archive
-"""
-def saveListFilesToZip(lstFiles, foutZip, pref=None):
-    doutZip=os.path.dirname(foutZip)
-    if not os.path.isdir(doutZip):
-        exitError(RET_DIR_NOTFOUND, metaInfo=doutZip)
-    zObj=zipfile.ZipFile(foutZip, 'w')
-    zipDir='/'
-    if pref is not None:
-        zipDir=pref
-    for ff in lstFiles:
-        if not os.path.isfile(ff):
-            exitError(RET_FILE_NOTFOUND, metaInfo=ff)
-        try:
-            fbaseName=os.path.basename(ff)
-            zObj.write(ff, '/%s/%s' % (zipDir, fbaseName))
-        except:
-            exitError(RET_ERR_CREATE_ZIP, metaInfo=foutZip)
+def convertDICOM2Nifti2(lstDICOMDict, outDir, isNiiPreview=False):
+    for kkStudy in lstDICOMDict.keys():
+        tmpDictSeries=lstDICOMDict[kkStudy]
+        # print kkStudy
+        for kkSeries in tmpDictSeries.keys():
+            # print "\t\t",kkSeries
+            tmpModality=kkSeries[3]
+            isNeedConvert=True
+            if tmpModality=='CT':
+                tmpNumFilesInSeries=len(tmpDictSeries[kkSeries])
+                if tmpNumFilesInSeries<DEF_MIN_NUM_FILES_IN_SERIES:
+                    isNeedConvert=False
+            if isNeedConvert:
+                tmpDir=tempfile.mkdtemp('dcm2nii')
+                tmpListDCM=tmpDictSeries[kkSeries]
+                foutNii="%s.nii.gz" % (DEF_FOUT_FORMAT % (kkStudy[0], kkSeries[2]))
+                foutNiiPath=os.path.join(outDir,foutNii)
+                try:
+                    for tdcm in tmpListDCM:
+                        shutil.copy2(tdcm.path, tmpDir)
+                    tmpListDCMinTmpDIR=getListFiles(tmpDir)
+                    cmdLine='%s -a y -e n -r n %s' % (DEF_DCM2NII_EXE, tmpListDCMinTmpDIR[0])
+                    retCode=os.system(cmdLine)
+                    lstNii=glob.glob('%s/*.nii*' % tmpDir)
+                    if len(lstNii)>0:
+                        fnii=lstNii[0]
+                        shutil.move(fnii, foutNiiPath)
+                    else:
+                        exitError(RET_CONV_NII_NOTFOUND, metaInfo=cmdLine)
+                except:
+                    print 'Error processing series ', kkSeries
+                shutil.rmtree(tmpDir, ignore_errors=True)
+                #
+                if isNiiPreview:
+                    foutNiiPrv="%s-preview.nii.gz" % (DEF_FOUT_FORMAT % (kkStudy[0], kkSeries[2]))
+                    foutNiiPrvPath=os.path.join(outDir,foutNiiPrv)
+                    makePreviewNifti(foutNiiPath, foutNiiPrvPath)
 
 """
 Anonymization function #1: one call of gdcmanon but
@@ -457,7 +520,7 @@ def makeAnonymization2(dirDICOM, isCheckGDCMError=True, isRemoveTmpDir=False):
         dirOut=os.path.dirname(fdcmOut)
         if not os.path.isdir(dirOut):
             os.makedirs(dirOut)
-        tmpCmd="%s -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, fdcmInp, fdcmOut)
+        tmpCmd="%s --dumb --empty 10,10 --empty 10,20 --remove 10,40 --remove 10,1010 -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, fdcmInp, fdcmOut)
         retCode=os.system(tmpCmd)
         if retCode==0:
             cntGood+=1
@@ -482,16 +545,18 @@ def parseCMD(argv):
         description='Prepare preview image for DICOM directory. Example: %s -siz 512x512 -nii -zip -rm /path/to/directory-with-DICOM' % pProg)
     parser.add_argument('-siz', help='size output preview image, like 512x512')
     parser.add_argument('-preview', action="store_true",  help='flag, if present - generate preview image')
-    parser.add_argument('-out', help='output prefix (without extension)')
+    parser.add_argument('-out', help='output directory (if empty - use input directory)')
     parser.add_argument('-rm',  action="store_true", help='flag, if present - remove input directory with DICOMs')
     parser.add_argument('-nii', action="store_true", help='flag, if present - create Nifti image')
+    parser.add_argument('-niiprv', action="store_true", help='flag, if present - create preview in Nifti format')
     parser.add_argument('-zip', action="store_true", help='flag, if present - create Zip archive with selected DICOMs files')
     parser.add_argument('-anon', action="store_true", help='flag, if present - anonymize DICOM files in directory')
+    parser.add_argument('-info', action="store_true", help='flag, print info about directory with DICOMs')
+    parser.add_argument('-infoq', action="store_true", help='flag, print quick info about directory with DICOMs')
     parser.add_argument('wdir')
     args=parser.parse_args()
     retSiz=sizDef
     retWdir='./'
-    retOfile=None
     if args.siz is not None:
         strSiz=args.siz.split('x')
         if len(strSiz)>1:
@@ -509,12 +574,15 @@ def parseCMD(argv):
     else:
         parser.print_help()
         exitError(RET_BAD_CMD_ARGS, metaInfo=argv)
+    dirOut=retWdir
     if args.out is not None:
-        retOfile=args.out
+        dirOut=args.out
     ret=args
+    if ret.niiprv:
+        ret.nii=True
     ret.wdir=retWdir
     ret.siz=retSiz
-    ret.out=retOfile
+    ret.out=dirOut
     # ret=(retWdir, retSiz, retOfile)
     return ret
 
@@ -525,70 +593,46 @@ if __name__=='__main__':
     wdirRoot=os.path.dirname(wdir)
     # (1) Anonymize DICOM files
     if retCMD.anon:
-        if not makeAnonymization2(wdir, isCheckGDCMError=False, isRemoveTmpDir=True):
+        print ":::makeAnonymization2()"
+        if not makeAnonymization2(wdir, isCheckGDCMError=False, isRemoveTmpDir=False):
             exitError(RET_ERR_ANONYMIZAION, metaInfo=wdir)
-    # (2) Preprocess and generate preview
-    # lstDICOM=readDICOMSeries(wdir)
-    # for ii in lstDICOM:
-    #     print ii, " : ", len(lstDICOM[ii])
-    # lstFDCM=getListFiles(wdir, isRelPath=False)
 
-    # (2) Test DICOM series v.2
-    # lstDICOM=readDICOMSeries2(wdir)
-    # printDICOMSeries2(lstDICOM)
+    # (2) check output directory
+    if not os.path.isdir(retCMD.out):
+        try:
+            os.makedirs(retCMD.out)
+        except:
+            exitError(RET_ERR_CREATE_DIR, metaInfo=retCMD.out)
 
+    # (3) Prepare dict with DICOM series
     lstFDCM=getListFiles(wdir)
-    lstDCM=[]
-    for ii in lstFDCM:
-        lstDCM.append(DCMHelper(ii))
-    lstDCM.sort()
-    for ii in lstDCM:
-        print ii
+    lstFDCMRel=getListFiles(wdir, isRelPath=True)
+    lstDICOM=readDICOMSeries2(wdir)
 
-    # lstId=[]
-    # for ii in lstFDCM:
-    #     dcm=dicom.read_file(ii, stop_before_pixels=True)
-    #     tmpId=(dcm.SeriesInstanceUID)#,dcm.InstanceNumber)
-    #     lstId.append(tmpId)
-    #     print tmpId
-    # print "-----------"
-    # print list(set(lstId))
-    sys.exit(2)
-    lstData,bestKey=findBestDICOMSeries(lstDICOM)
-    imgPreviewRet=generatePreviewOutput(lstData)
-    imgPreviewResiz=imgPreviewRet[0]
-    newSize=retCMD.siz
-    try:
-        imgPreviewResiz=sk.transform.resize(imgPreviewRet[0],newSize,order=4,preserve_range=True).astype(np.uint8)
-    except:
-        exitError(RET_ERR_RESIZ_IMAGE, metaInfo="size=%s" % newSize)
-    #
-    studyId=imgPreviewRet[1] #os.path.basename(wdir)
-    foutPrefix=os.path.join(wdirRoot, studyId)
-    if retCMD.out is not None:
-        tNewDir=retCMD.out
-        if not os.path.isdir(tNewDir):
-            os.makedirs(tNewDir)
-        if not os.path.isdir(tNewDir):
-            exitError(RET_DIR_NOTFOUND, metaInfo=tNewDir)
-        foutPrefix=os.path.join(tNewDir, studyId)
-    foutImg='%s_%d_%d.jpg' % (foutPrefix, newSize[1],newSize[0])
-    foutNiiOrig='%s_orig.nii.gz' % foutPrefix
-    foutNiiResiz='%s.nii.gz' % foutPrefix
-    foutZip='%s.zip' % foutPrefix
-    # (3) Save preview image
-    try:
-        sk.io.imsave(foutImg,imgPreviewResiz)
-    except:
-        exitError(RET_ERR_WRITE_IMAGE, metaInfo=foutImg)
-    # (4) Save Nifti data
+    # (4) Check Info parameter
+    if retCMD.info:
+        printDICOMSeries2(lstDICOM, isQuickPrint=False)
+        sys.exit(RET_SUCCESS)
+    if retCMD.infoq:
+        printDICOMSeries2(lstDICOM, isQuickPrint=True)
+        sys.exit(RET_SUCCESS)
+
+    # (5) Check -nii parameter: convert DICOM to Nifti
     if retCMD.nii:
-        convertDICOM2Nifti(lstData[1][0], foutNiiOrig)
-        resizeNifti(foutNiiOrig, foutNiiResiz)
-    # (5) Prepare DICOM Zip archive
+        print ":::convertDICOM2Nifti2()"
+        convertDICOM2Nifti2(lstDICOM, retCMD.out, isNiiPreview=retCMD.niiprv)
+
+    # (6) Check -preview parameter: make preview for CT and CR
+    if retCMD.preview:
+        print ":::preparePreviewForDICOM()"
+        preparePreviewForDICOM(lstDICOM, retCMD.out, sizPreview=retCMD.siz)
+
+    # (7) Check -zip parameter: make zip archive for every StudyUID
     if retCMD.zip:
-        saveListFilesToZip(lstData[1], foutZip, pref=imgPreviewRet[1])
-    # (6) Clean input data
+        print ":::prepareZipForDICOM()"
+        prepareZipForDICOM(lstDICOM, retCMD.out, wdir)
+
+    # (8) Check -rm parameter: clean input directory
     if retCMD.rm:
         try:
             shutil.rmtree(wdir)
