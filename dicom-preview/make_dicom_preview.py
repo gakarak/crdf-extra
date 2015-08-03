@@ -521,11 +521,68 @@ def makeAnonymization2(dirDICOM, isCheckGDCMError=True, isRemoveTmpDir=False):
         if not os.path.isdir(dirOut):
             os.makedirs(dirOut)
         tmpCmd="%s --dumb --empty 10,10 --empty 10,20 --remove 10,40 --remove 10,1010 -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, fdcmInp, fdcmOut)
+        #tmpCmd="%s -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, fdcmInp, fdcmOut)
         retCode=os.system(tmpCmd)
         if retCode==0:
             cntGood+=1
         else:
             shutil.copy2(fdcmInp, fdcmOut)
+    if isCheckGDCMError:
+        if cntGood!=cntTot:
+            isNoError=False
+            shutil.rmtree(dirDICOM)
+            shutil.move(dirDICOMtmp,dirDICOM)
+    if isRemoveTmpDir:
+        shutil.rmtree(dirDICOMtmp)
+    return isNoError
+
+"""
+Anonymization function #3: one call per DICOM file, but
+work stable - if gdcmanon return error - just copy file
+append shadow creation tmp-file for solve non-latin characters in path (Windows bug)
+"""
+def makeAnonymization3(dirDICOM, isCheckGDCMError=True, isRemoveTmpDir=False):
+    isNoError=True
+    if not os.path.isdir(dirDICOM):
+        exitError(RET_DIR_NOTFOUND, metaInfo=dirDICOM)
+    dirDICOMtmp="%s%s" % (dirDICOM,DEF_DCMDIRTMP_PREF)
+    try:
+        shutil.move(dirDICOM,dirDICOMtmp)
+    except:
+        exitError(RET_ERR_MOVE_DIR, metaInfo=dirDICOMtmp)
+    lstFDCMRel=getListFiles(dirDICOMtmp, parLstExt=lstExt, isRelPath=True)
+    cntTot=len(lstFDCMRel)
+    cntGood=0
+    tmpDir=tempfile.mkdtemp(suffix='anon3')
+    tmpFileInp=os.path.join(tmpDir, 'tmp_dcm_inp.dcm')
+    tmpFileOut=os.path.join(tmpDir, 'tmp_dcm_out.dcm')
+    for ll in lstFDCMRel:
+        fdcmInp=os.path.join(dirDICOMtmp, ll)
+        fdcmOut=os.path.join(dirDICOM, ll)
+        # copy input to tmp-input
+        try:
+            shutil.copy2(fdcmInp,tmpFileInp)
+        except:
+            print 'Cant copy INPUT tmp-file [%s] -> [%s]' % (fdcmInp,tmpFileInp)
+        #
+        dirOut=os.path.dirname(fdcmOut)
+        if not os.path.isdir(dirOut):
+            os.makedirs(dirOut)
+        # tmpCmd="%s --dumb --empty 10,10 --empty 10,20 --remove 10,40 --remove 10,1010 -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, fdcmInp, fdcmOut)
+        tmpCmd="%s --dumb --empty 10,10 --empty 10,20 --remove 10,40 --remove 10,1010 -r --continue -i \"%s\" -o \"%s\"" % (DEF_DCMANON_EXE, tmpFileInp, tmpFileOut)
+        retCode=os.system(tmpCmd)
+        try:
+            shutil.copy2(tmpFileOut,fdcmOut)
+        except:
+            print 'Cant copy OUTPUT tmp-file [%s] -> [%s]' % (tmpFileOut,fdcmOut)
+        if retCode==0:
+            cntGood+=1
+        else:
+            shutil.copy2(fdcmInp, fdcmOut)
+    try:
+        shutil.rmtree(tmpDir)
+    except:
+        print '!!!WARNING!!! Cant remove tmp-anon directory [%s]' % tmpDir
     if isCheckGDCMError:
         if cntGood!=cntTot:
             isNoError=False
@@ -594,7 +651,7 @@ if __name__=='__main__':
     # (1) Anonymize DICOM files
     if retCMD.anon:
         print ":::makeAnonymization2()"
-        if not makeAnonymization2(wdir, isCheckGDCMError=False, isRemoveTmpDir=False):
+        if not makeAnonymization3(wdir, isCheckGDCMError=False, isRemoveTmpDir=False):
             exitError(RET_ERR_ANONYMIZAION, metaInfo=wdir)
 
     # (2) check output directory
